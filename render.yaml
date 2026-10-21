@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: shams-api
+    runtime: node
+    rootDir: backend-shams
+    plan: starter
+    buildCommand: npm ci --omit=dev && npm run check
+    startCommand: npm start
+    healthCheckPath: /health
+    disk:
+      name: shams-uploads
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: MONGODB_URI
+        sync: false
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: CORS_ORIGINS
+        sync: false
+      - key: ADMIN_EMAILS
+        value: ''
+      - key: GOOGLE_CLIENT_ID
+        value: ''
+      - key: FACEBOOK_APP_ID
+        value: ''
