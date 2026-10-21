@@ -23,10 +23,21 @@ const corsOrigin = allowedOrigins.includes('*') ? '*' : allowedOrigins;
 const io = new SocketServer(httpServer, { cors: { origin: corsOrigin } });
 const port = Number(process.env.PORT || 5000);
 const uploadDir = path.resolve(process.env.UPLOAD_DIR || 'uploads');
-const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean));
+const bootstrapAdminEmail = (process.env.ADMIN_BOOTSTRAP_EMAIL || '').trim().toLowerCase();
+const bootstrapAdminPassword = process.env.ADMIN_BOOTSTRAP_PASSWORD || '';
+const adminEmails = new Set([
+  ...(process.env.ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean),
+  ...(bootstrapAdminEmail ? [bootstrapAdminEmail] : []),
+]);
 
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   throw new Error('JWT_SECRET doit contenir au moins 32 caractères.');
+}
+if (Boolean(bootstrapAdminEmail) !== Boolean(bootstrapAdminPassword)) {
+  throw new Error('ADMIN_BOOTSTRAP_EMAIL et ADMIN_BOOTSTRAP_PASSWORD doivent être définis ensemble.');
+}
+if (bootstrapAdminEmail && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bootstrapAdminEmail) || bootstrapAdminPassword.length < 16)) {
+  throw new Error('Bootstrap admin invalide: e-mail valide et mot de passe de 16 caractères minimum requis.');
 }
 
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -99,6 +110,37 @@ const Message = mongoose.model('Message', messageSchema);
 const Ritual = mongoose.model('Ritual', ritualSchema);
 const RitualOrder = mongoose.model('RitualOrder', ritualOrderSchema);
 const GeomancyReading = mongoose.model('GeomancyReading', geomancyReadingSchema);
+
+async function ensureBootstrapAdmin() {
+  if (!bootstrapAdminEmail) return;
+  let user = await User.findOne({ email: bootstrapAdminEmail }).select('+motDePasse');
+  if (!user) {
+    user = await User.create({
+      nom: 'Administrateur',
+      email: bootstrapAdminEmail,
+      role: 'ADMIN',
+      adminApproved: true,
+      motDePasse: await bcrypt.hash(bootstrapAdminPassword, 12),
+    });
+    console.log('Bootstrap admin account created.');
+    return;
+  }
+
+  let changed = false;
+  if (user.role !== 'ADMIN' || user.adminApproved !== true) {
+    user.role = 'ADMIN';
+    user.adminApproved = true;
+    changed = true;
+  }
+  if (!user.motDePasse) {
+    user.motDePasse = await bcrypt.hash(bootstrapAdminPassword, 12);
+    changed = true;
+  }
+  if (changed) {
+    await user.save();
+    console.log('Bootstrap admin account enabled.');
+  }
+}
 
 let onlineAdminCount = 0;
 
@@ -451,6 +493,7 @@ app.use((error, _req, res, _next) => {
 
 async function start() {
   await mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/shams');
+  await ensureBootstrapAdmin();
   httpServer.listen(port, '0.0.0.0', () => console.log(`Shams API listening on port ${port}`));
 }
 

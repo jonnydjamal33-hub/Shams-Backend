@@ -25,6 +25,10 @@ services:
         sync: false
       - key: ADMIN_EMAILS
         value: ''
+      - key: ADMIN_BOOTSTRAP_EMAIL
+        sync: false
+      - key: ADMIN_BOOTSTRAP_PASSWORD
+        sync: false
       - key: GOOGLE_CLIENT_ID
         value: ''
       - key: FACEBOOK_APP_ID

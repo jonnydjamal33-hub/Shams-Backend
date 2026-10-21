@@ -34,7 +34,7 @@ Le fichier `render.yaml` à la racine du dépôt configure le service Node, le h
 1. Poussez le dépôt sur GitHub et créez un Blueprint Render en sélectionnant ce dépôt et son `render.yaml`.
 2. Renseignez `MONGODB_URI` avec l'URI MongoDB Atlas. Configurez l'accès réseau Atlas pour permettre les connexions sortantes Render.
 3. Définissez `CORS_ORIGINS` comme une liste de domaines web HTTPS séparés par des virgules; utilisez `*` uniquement si l'accès navigateur depuis toutes origines est voulu. Pour une app mobile native seule, une liste vide convient.
-4. Renseignez `ADMIN_EMAILS` (adresses réservées seulement; cela ne donne pas le rôle admin). Provisionnez ensuite l'administrateur vérifié en base avec `role: "ADMIN"` et `adminApproved: true`.
+4. Configurez `ADMIN_BOOTSTRAP_EMAIL` et `ADMIN_BOOTSTRAP_PASSWORD` comme variables secrètes Render (mot de passe d'au moins 16 caractères). Au démarrage, le backend crée ce compte admin s'il n'existe pas, ou approuve le compte existant de cette adresse. Le mot de passe bootstrap n'est défini que pour un nouveau compte ou un compte qui n'a pas encore de mot de passe local; les redémarrages ne remplacent pas le mot de passe existant. `ADMIN_EMAILS` reste une liste d'adresses réservées et ne donne pas, à elle seule, les privilèges admin.
 5. Configurez la compilation mobile de production avec `--dart-define=API_BASE_URL=https://<nom-du-service>.onrender.com`.
 
 Après le déploiement, vérifiez `https://<nom-du-service>.onrender.com/health`. Render fournit HTTPS et prend en charge WebSocket pour Socket.IO.
