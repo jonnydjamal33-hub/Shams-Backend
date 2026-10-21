@@ -27,6 +27,18 @@ cd shams
 flutter run --dart-define=API_BASE_URL=http://10.0.2.2:5000
 ```
 
+## Déploiement Render
+
+Le fichier `render.yaml` à la racine du dépôt configure le service Node, le health check `/health` et un disque persistant monté sur `/var/data` pour les uploads. Le disque exige une instance Render payante; sans disque, les photos peuvent être perdues lors d'un redéploiement ou redémarrage.
+
+1. Poussez le dépôt sur GitHub et créez un Blueprint Render en sélectionnant ce dépôt et son `render.yaml`.
+2. Renseignez `MONGODB_URI` avec l'URI MongoDB Atlas. Configurez l'accès réseau Atlas pour permettre les connexions sortantes Render.
+3. Définissez `CORS_ORIGINS` comme une liste de domaines web HTTPS séparés par des virgules; utilisez `*` uniquement si l'accès navigateur depuis toutes origines est voulu. Pour une app mobile native seule, une liste vide convient.
+4. Renseignez `ADMIN_EMAILS` (adresses réservées seulement; cela ne donne pas le rôle admin). Provisionnez ensuite l'administrateur vérifié en base avec `role: "ADMIN"` et `adminApproved: true`.
+5. Configurez la compilation mobile de production avec `--dart-define=API_BASE_URL=https://<nom-du-service>.onrender.com`.
+
+Après le déploiement, vérifiez `https://<nom-du-service>.onrender.com/health`. Render fournit HTTPS et prend en charge WebSocket pour Socket.IO.
+
 ## Routes mobiles
 
 - Authentification : `POST /api/auth/register`, `/login`, `/google`, `/facebook`. Toute création publique locale ou OAuth produit un compte `CLIENT`; aucune connexion ne promeut un compte par son adresse e-mail. Les adresses de `ADMIN_EMAILS` sont réservées et refusées par l'inscription locale.
