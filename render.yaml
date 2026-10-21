@@ -2,7 +2,6 @@ services:
   - type: web
     name: shams-api
     runtime: node
-    rootDir: backend-shams
     plan: starter
     buildCommand: npm ci --omit=dev && npm run check
     startCommand: npm start
