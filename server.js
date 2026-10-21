@@ -72,6 +72,7 @@ const consultationSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const messageSchema = new mongoose.Schema({
+  messageId: { type: String, required: true, unique: true, default: () => crypto.randomUUID() },
   consultation: { type: mongoose.Schema.Types.ObjectId, ref: 'Consultation', required: true, index: true },
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   contenu: { type: String, required: true, trim: true, maxlength: 2000 },
@@ -487,11 +488,18 @@ app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) return respondError(res, 400, error.code === 'LIMIT_FILE_SIZE' ? 'Fichier limité à 8 Mo.' : 'Dépôt de fichier invalide.');
   if (error instanceof mongoose.Error.ValidationError) return respondError(res, 400, error.message);
   if (error.code === 11000) {
+    const duplicateIndex = (error.message || '').match(/collection:\s+([^\s]+)\s+index:\s+([^\s]+)/);
+    const collectionName = error.collection?.collectionName
+      || duplicateIndex?.[1]?.split('.').pop()
+      || 'unknown';
+    const indexName = duplicateIndex?.[2] || 'unknown';
     const duplicateFields = Object.keys(error.keyPattern || {});
-    const isDuplicateEmail = duplicateFields.includes('email') || /index:\s*email_1\b/.test(error.message || '');
+    const isDuplicateEmail = collectionName === 'users'
+      && (duplicateFields.includes('email') || indexName === 'email_1');
     if (process.env.NODE_ENV === 'production') {
       console.error('MongoDB duplicate key error', {
-        collection: error.collection || 'unknown',
+        collection: collectionName,
+        index: indexName,
         fields: duplicateFields,
       });
     }
