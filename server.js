@@ -36,6 +36,7 @@ const userSchema = new mongoose.Schema({
   telephone: { type: String, trim: true, default: '' },
   photo: { type: String, default: '' },
   role: { type: String, enum: ['CLIENT', 'ADMIN'], default: 'CLIENT' },
+  adminApproved: { type: Boolean, default: false },
   fournisseur: { type: String, default: 'local' },
   fournisseurId: { type: String },
 }, { timestamps: true });
@@ -135,6 +136,9 @@ const requireAuth = asyncRoute(async (req, res, next) => {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     req.user = await User.findById(payload.sub);
     if (!req.user) return respondError(res, 401, 'Session invalide.');
+    if (req.user.role === 'ADMIN' && req.user.adminApproved !== true) {
+      return respondError(res, 403, 'Compte administrateur non approuvé.');
+    }
     next();
   } catch (_error) {
     return respondError(res, 401, 'Session invalide ou expirée.');
@@ -142,7 +146,9 @@ const requireAuth = asyncRoute(async (req, res, next) => {
 });
 
 const requireAdmin = (req, res, next) => {
-  if (req.user?.role !== 'ADMIN') return respondError(res, 403, 'Accès réservé à l’administration.');
+  if (req.user?.role !== 'ADMIN' || req.user.adminApproved !== true) {
+    return respondError(res, 403, 'Accès réservé à un compte administrateur approuvé.');
+  }
   next();
 };
 
@@ -153,9 +159,12 @@ app.post('/api/auth/register', authLimiter, asyncRoute(async (req, res) => {
   if (!nom || !email || !motDePasse) return respondError(res, 400, 'Nom, e-mail et mot de passe sont obligatoires.');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return respondError(res, 400, 'Adresse e-mail invalide.');
   if (String(motDePasse).length < 8) return respondError(res, 400, 'Le mot de passe doit contenir au moins 8 caractères.');
-  if (await User.exists({ email: String(email).toLowerCase().trim() })) return respondError(res, 409, 'Cette adresse e-mail est déjà utilisée.');
   const normalizedEmail = String(email).toLowerCase().trim();
-  const user = await User.create({ nom, prenom, email: normalizedEmail, telephone, role: adminEmails.has(normalizedEmail) ? 'ADMIN' : 'CLIENT', motDePasse: await bcrypt.hash(motDePasse, 12) });
+  if (adminEmails.has(normalizedEmail)) {
+    return respondError(res, 403, 'Cette adresse est réservée à un compte administrateur provisionné.');
+  }
+  if (await User.exists({ email: normalizedEmail })) return respondError(res, 409, 'Cette adresse e-mail est déjà utilisée.');
+  const user = await User.create({ nom, prenom, email: normalizedEmail, telephone, role: 'CLIENT', motDePasse: await bcrypt.hash(motDePasse, 12) });
   const token = signToken(user);
   res.status(201).json({ data: { token, user: publicUser(user) } });
 }));
@@ -166,9 +175,8 @@ app.post('/api/auth/login', authLimiter, asyncRoute(async (req, res) => {
   if (!user || !user.motDePasse || !(await bcrypt.compare(String(req.body.motDePasse || ''), user.motDePasse))) {
     return respondError(res, 401, 'E-mail ou mot de passe incorrect.');
   }
-  if (adminEmails.has(email) && user.role !== 'ADMIN') {
-    user.role = 'ADMIN';
-    await user.save();
+  if (user.role === 'ADMIN' && user.adminApproved !== true) {
+    return respondError(res, 403, 'Compte administrateur non approuvé. Contactez l’administrateur du système.');
   }
   res.json({ ...publicUser(user), token: signToken(user) });
 }));
@@ -193,6 +201,9 @@ app.post('/api/auth/google', authLimiter, asyncRoute(async (req, res) => {
     if (!response.ok) return respondError(res, 401, 'Jeton Google invalide.');
   }
   if (!profile?.email || profile.email_verified === false) return respondError(res, 401, 'Compte Google non vérifié.');
+  if (adminEmails.has(profile.email.toLowerCase())) {
+    return respondError(res, 403, 'Cette adresse admin doit utiliser son compte provisionné.');
+  }
   const user = await findOrCreateSocialUser({ email: profile.email, nom: profile.family_name || profile.name || 'Utilisateur', prenom: profile.given_name || '', photo: profile.picture || '', fournisseur: 'google', fournisseurId: profile.sub });
   res.json({ token: signToken(user), user: publicUser(user) });
 }));
@@ -207,22 +218,21 @@ app.post('/api/auth/facebook', authLimiter, asyncRoute(async (req, res) => {
   const response = await fetch(url);
   const profile = await response.json();
   if (!response.ok || !profile.email) return respondError(res, 401, 'Jeton Facebook invalide ou adresse e-mail indisponible.');
+  if (adminEmails.has(profile.email.toLowerCase())) {
+    return respondError(res, 403, 'Cette adresse admin doit utiliser son compte provisionné.');
+  }
   const user = await findOrCreateSocialUser({ email: profile.email, nom: profile.last_name || profile.name, prenom: profile.first_name || '', photo: profile.picture?.data?.url || '', fournisseur: 'facebook', fournisseurId: profile.id });
   res.json({ token: signToken(user), user: publicUser(user) });
 }));
 
 async function findOrCreateSocialUser(profile) {
   let user = await User.findOne({ $or: [{ email: profile.email.toLowerCase() }, { fournisseur: profile.fournisseur, fournisseurId: profile.fournisseurId }] });
-  if (!user) user = await User.create({ ...profile, role: adminEmails.has(profile.email.toLowerCase()) ? 'ADMIN' : 'CLIENT' });
+  if (!user) user = await User.create({ ...profile, role: 'CLIENT' });
   else {
     let changed = false;
     if (!user.fournisseurId) {
       user.fournisseur = profile.fournisseur;
       user.fournisseurId = profile.fournisseurId;
-      changed = true;
-    }
-    if (adminEmails.has(profile.email.toLowerCase()) && user.role !== 'ADMIN') {
-      user.role = 'ADMIN';
       changed = true;
     }
     if (changed) await user.save();
@@ -376,6 +386,9 @@ io.use(async (socket, next) => {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(payload.sub);
     if (!user) return next(new Error('Session invalide.'));
+    if (user.role === 'ADMIN' && user.adminApproved !== true) {
+      return next(new Error('Compte administrateur non approuvé.'));
+    }
     socket.user = user;
     next();
   } catch (_error) {
