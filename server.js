@@ -486,7 +486,23 @@ app.use((req, res) => respondError(res, 404, `Route inconnue : ${req.method} ${r
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) return respondError(res, 400, error.code === 'LIMIT_FILE_SIZE' ? 'Fichier limité à 8 Mo.' : 'Dépôt de fichier invalide.');
   if (error instanceof mongoose.Error.ValidationError) return respondError(res, 400, error.message);
-  if (error.code === 11000) return respondError(res, 409, 'Cette adresse e-mail est déjà utilisée.');
+  if (error.code === 11000) {
+    const duplicateFields = Object.keys(error.keyPattern || {});
+    const isDuplicateEmail = duplicateFields.includes('email') || /index:\s*email_1\b/.test(error.message || '');
+    if (process.env.NODE_ENV === 'production') {
+      console.error('MongoDB duplicate key error', {
+        collection: error.collection || 'unknown',
+        fields: duplicateFields,
+      });
+    }
+    return respondError(
+      res,
+      409,
+      isDuplicateEmail
+        ? 'Cette adresse e-mail est déjà utilisée.'
+        : 'Une donnée existe déjà. Rechargez les données et réessayez.',
+    );
+  }
   if (process.env.NODE_ENV !== 'production') console.error(error);
   return respondError(res, error.status || 500, error.status ? error.message : 'Erreur interne du serveur.');
 });
