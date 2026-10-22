@@ -85,6 +85,7 @@ const ritualSchema = new mongoose.Schema({
   duree: { type: String, required: true, trim: true, maxlength: 40 },
   prix: { type: Number, required: true, min: 0 },
   devise: { type: String, default: 'MGA' },
+  imageUrl: { type: String, default: '' },
   actif: { type: Boolean, default: true },
   ordre: { type: Number, default: 0 },
 }, { timestamps: true });
@@ -315,7 +316,8 @@ app.get('/api/consultations', requireAuth, asyncRoute(async (req, res) => {
     consultation = await Consultation.create({ client: req.user.id });
     io.to('admins').emit('consultation:new', await consultation.populate('client', 'nom prenom email photo'));
   }
-  const messages = await Message.find({ consultation: consultation.id }).populate('sender', 'nom prenom role').sort({ createdAt: 1 }).limit(200);
+  const messages = await Message.find({ consultation: consultation.id }).populate('sender', 'nom prenom role photo').sort({ createdAt: 1 }).limit(200);
+  await consultation.populate('admin', 'nom prenom photo role');
   return res.json({ ...consultation.toObject(), messages });
 }));
 
@@ -328,7 +330,7 @@ app.post('/api/consultations', requireAuth, asyncRoute(async (req, res) => {
 app.get('/api/consultations/:id/messages', requireAuth, asyncRoute(async (req, res) => {
   const consultation = await findAccessibleConsultation(req.params.id, req.user);
   if (!consultation) return respondError(res, 404, 'Consultation introuvable.');
-  const messages = await Message.find({ consultation: consultation.id }).populate('sender', 'nom prenom role').sort({ createdAt: 1 }).limit(200);
+  const messages = await Message.find({ consultation: consultation.id }).populate('sender', 'nom prenom role photo').sort({ createdAt: 1 }).limit(200);
   res.json(messages);
 }));
 
@@ -345,7 +347,7 @@ app.post('/api/consultations/:id/messages', requireAuth, asyncRoute(async (req, 
     consultation.admin = req.user.id;
   }
   await consultation.save();
-  const populatedMessage = await message.populate('sender', 'nom prenom role');
+  const populatedMessage = await message.populate('sender', 'nom prenom role photo');
   io.to(`consultation:${consultation.id}`).emit('message:new', populatedMessage);
   if (req.user.role !== 'ADMIN') io.to('admins').emit('consultation:message', { consultationId: consultation.id, message: populatedMessage });
   res.status(201).json(populatedMessage);
@@ -361,15 +363,36 @@ app.patch('/api/consultations/:id/status', requireAuth, requireAdmin, asyncRoute
 }));
 
 app.get('/api/rituals', asyncRoute(async (_req, res) => res.json(await Ritual.find({ actif: true }).sort({ ordre: 1, createdAt: 1 }))));
-app.post('/api/rituals', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
-  const ritual = await Ritual.create(req.body);
+const ritualImageUpload = upload.single('image');
+app.post('/api/rituals', requireAuth, requireAdmin, ritualImageUpload, asyncRoute(async (req, res) => {
+  const ritualData = { ...req.body };
+  if (req.file) ritualData.imageUrl = `/uploads/${req.file.filename}`;
+  const ritual = await Ritual.create(ritualData);
   res.status(201).json(ritual);
 }));
-app.put('/api/rituals/:id', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
-  const allowed = ['titre', 'description', 'duree', 'prix', 'devise', 'actif', 'ordre'];
+app.put('/api/rituals/:id', requireAuth, requireAdmin, ritualImageUpload, asyncRoute(async (req, res) => {
+  const allowed = ['titre', 'description', 'duree', 'prix', 'devise', 'imageUrl', 'actif', 'ordre'];
   const updates = Object.fromEntries(Object.entries(req.body).filter(([key]) => allowed.includes(key)));
+  if (req.file) updates.imageUrl = `/uploads/${req.file.filename}`;
   const ritual = await Ritual.findByIdAndUpdate(req.params.id, updates, { new: true, runValidators: true });
   if (!ritual) return respondError(res, 404, 'Rituel introuvable.');
+  res.json(ritual);
+}));
+app.post('/api/rituals/:id/image', requireAuth, requireAdmin, upload.single('image'), asyncRoute(async (req, res) => {
+  if (!req.file) return respondError(res, 400, 'Sélectionnez une image de rituel.');
+  if (!req.file.mimetype.startsWith('image/')) {
+    await fs.promises.unlink(req.file.path).catch(() => {});
+    return respondError(res, 400, 'Le fichier du rituel doit être une image.');
+  }
+  const ritual = await Ritual.findByIdAndUpdate(
+    req.params.id,
+    { imageUrl: `/uploads/${req.file.filename}` },
+    { new: true, runValidators: true },
+  );
+  if (!ritual) {
+    await fs.promises.unlink(req.file.path).catch(() => {});
+    return respondError(res, 404, 'Rituel introuvable.');
+  }
   res.json(ritual);
 }));
 app.delete('/api/rituals/:id', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
@@ -402,6 +425,50 @@ app.put('/api/rituals/orders/:id/status', requireAuth, requireAdmin, asyncRoute(
 function xorFigure(left, right) {
   return left.map((line, index) => line === right[index] ? 2 : 1);
 }
+
+const geomancyCaseGroups = {
+  '1': [1, 1], '8': [1, 1], B: [1, 1], E: [1, 1],
+  '2': [2, 2], '5': [2, 2], C: [2, 2], F: [2, 2],
+  '3': [2, 1], '6': [2, 1], '9': [2, 1], '10': [2, 1],
+  '4': [1, 2], '7': [1, 2], A: [1, 2], D: [1, 2],
+};
+
+const geomancyFigures = {
+  '1,1,1,1': { name: 'Via', title: 'Le Chemin', sign: 'Cancer ♋', response: 'Mauvais, mais tendant vers le bien', challenge: 'Instabilité, difficulté à se fixer', message: 'Laisse-toi porter par le mouvement' },
+  '1,1,2,2': { name: 'Fortuna Minor', title: 'La Petite Fortune', sign: 'Lion ♌', response: 'Mauvais, mais tendant vers le bien', challenge: 'Résultat éphémère', message: "Profite de l'occasion qui se présente" },
+  '1,1,2,1': { name: 'Puer', title: 'Le Garçon', sign: 'Bélier ♈', response: 'Mauvais', challenge: 'Colère, impulsivité, conflit', message: 'Passe à l’action mais garde ton discernement' },
+  '1,1,1,2': { name: 'Cauda Draconis', title: 'La Queue du Dragon', sign: 'Scorpion ♏', response: 'Très mauvais', challenge: 'Rupture, deuil, séparation', message: 'Laisse partir ce qui doit partir' },
+  '2,2,1,1': { name: 'Fortuna Major', title: 'La Grande Fortune', sign: 'Verseau ♒', response: 'Très bien', challenge: 'Nécessité de la persévérance', message: 'Continue. Tu es sur le bon chemin' },
+  '2,2,2,2': { name: 'Populus', title: 'Le Peuple', sign: 'Cancer ♋', response: 'Nuancé / Neutre', challenge: 'Dispersion, influence de la masse', message: 'Reste centré face à la foule' },
+  '2,2,2,1': { name: 'Tristitia', title: 'La Tristesse', sign: 'Scorpion ♏', response: 'Mauvais', challenge: 'Déception, mélancolie, lourdeur', message: 'Accepte la douleur passagère pour reconstruire' },
+  '2,2,1,2': { name: 'Albus', title: 'Le Blanc', sign: 'Gémeaux ♊', response: 'Bien', challenge: 'Trop réfléchir, isolement', message: 'La réponse vient dans le calme' },
+  '2,1,1,1': { name: 'Caput Draconis', title: 'La Tête du Dragon', sign: 'Sagittaire ♐', response: 'Bien', challenge: "Accepter l'inconnu", message: "Une porte s'ouvre devant toi" },
+  '2,1,2,2': { name: 'Rubeus', title: 'Le Rouge', sign: 'Scorpion ♏', response: 'Mauvais', challenge: 'Excès, conflits, émotions fortes', message: 'Canalise cette énergie plutôt que de la subir' },
+  '2,1,2,1': { name: 'Acquisitio', title: 'Le Gain', sign: 'Sagittaire ♐', response: 'Très bien', challenge: 'Attachement excessif au matériel', message: 'Quelque chose est en train de grandir en toi' },
+  '2,1,1,2': { name: 'Conjunctio', title: "L'Union", sign: 'Vierge ♍', response: 'Plutôt bien', challenge: "Dépendance à l'autre, fusion", message: 'Une alliance importante se présente' },
+  '1,2,1,1': { name: 'Puella', title: 'La Jeune Fille', sign: 'Balance ♎', response: 'Bien', challenge: 'Passivité, évitement des conflits', message: 'La douceur peut résoudre ce que la force ne peut pas' },
+  '1,2,2,2': { name: 'Laetitia', title: 'La Joie', sign: 'Poissons ♓', response: 'Très bien', challenge: "Excès d'optimisme", message: 'Lève les yeux. La lumière revient' },
+  '1,2,2,1': { name: 'Carcer', title: 'La Prison', sign: 'Capricorne ♑', response: 'Très mauvais', challenge: "Blocage, sentiment d'enfermement", message: "Tout n'est pas accessible immédiatement" },
+  '1,2,1,2': { name: 'Amissio', title: 'La Perte', sign: 'Taureau ♉', response: 'Très mauvais', challenge: 'Perte, manque, séparation', message: "La perte d'aujourd'hui peut être le gain de demain" },
+};
+
+app.post('/api/geomancy/combine', requireAuth, (req, res) => {
+  const caseTop = String(req.body?.caseTop ?? '').toUpperCase();
+  const caseBottom = String(req.body?.caseBottom ?? '').toUpperCase();
+  const patternTop = geomancyCaseGroups[caseTop];
+  const patternBottom = geomancyCaseGroups[caseBottom];
+
+  if (!patternTop || !patternBottom) {
+    return respondError(res, 400, 'Cases invalides. Utilisez les identifiants : 1 à 10 et A à F.');
+  }
+
+  const pattern = [...patternTop, ...patternBottom].join(',');
+  return res.json({
+    selection: { caseTop, caseBottom },
+    pattern,
+    figure: geomancyFigures[pattern],
+  });
+});
 
 app.post('/api/geomancy/readings', requireAuth, asyncRoute(async (req, res) => {
   const question = String(req.body.question || '').trim();
@@ -467,7 +534,7 @@ io.on('connection', (socket) => {
         consultation.admin = socket.user.id;
       }
       await consultation.save();
-      const populated = await message.populate('sender', 'nom prenom role');
+      const populated = await message.populate('sender', 'nom prenom role photo');
       io.to(`consultation:${consultation.id}`).emit('message:new', populated);
       if (socket.user.role !== 'ADMIN') io.to('admins').emit('consultation:message', { consultationId: consultation.id, message: populated });
       acknowledge({ ok: true, message: populated });
