@@ -12,6 +12,7 @@ const helmet = require('helmet');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit');
 const { OAuth2Client } = require('google-auth-library');
+const SunCalc = require('suncalc');
 const { createServer } = require('node:http');
 const { Server: SocketServer } = require('socket.io');
 
@@ -451,6 +452,100 @@ const geomancyFigures = {
   '1,2,2,1': { name: 'Carcer', title: 'La Prison', sign: 'Capricorne ♑', response: 'Très mauvais', challenge: "Blocage, sentiment d'enfermement", message: "Tout n'est pas accessible immédiatement" },
   '1,2,1,2': { name: 'Amissio', title: 'La Perte', sign: 'Taureau ♉', response: 'Très mauvais', challenge: 'Perte, manque, séparation', message: "La perte d'aujourd'hui peut être le gain de demain" },
 };
+
+const chogadiaPlanets = [
+  { name: 'ZOHAL / SATURN', code: 'U', status: 'Unfavourable' },
+  { name: 'MUSHTARI / JUPITER', code: 'E', status: 'Excellent' },
+  { name: 'MIRRIKH / MARS', code: 'U', status: 'Unfavourable' },
+  { name: 'SHAMS / SUN', code: 'G', status: 'Good' },
+  { name: 'ZOHRA / VENUS', code: 'E', status: 'Excellent' },
+  { name: 'OTARID / MERCURY', code: 'N', status: 'Normal' },
+  { name: 'QAMAR / MOON', code: 'G', status: 'Good' },
+];
+const chogadiaDayFirstPlanet = [3, 6, 2, 5, 1, 4, 0];
+
+function formatLocalTime(date, timezoneOffsetMinutes) {
+  const localTime = new Date(date.getTime() + timezoneOffsetMinutes * 60_000);
+  return `${String(localTime.getUTCHours()).padStart(2, '0')}:${String(localTime.getUTCMinutes()).padStart(2, '0')}`;
+}
+
+function localDateAnchor(date, timezoneOffsetMinutes) {
+  const localDate = new Date(date.getTime() + timezoneOffsetMinutes * 60_000);
+  return new Date(Date.UTC(localDate.getUTCFullYear(), localDate.getUTCMonth(), localDate.getUTCDate(), 12));
+}
+
+app.post('/api/chogadia/dynamic', requireAuth, (req, res) => {
+  const latitude = req.body?.latitude ?? 24.8607;
+  const longitude = req.body?.longitude ?? 67.0011;
+  const timezoneOffsetMinutes = req.body?.timezoneOffsetMinutes ?? 0;
+  const date = req.body?.userTimestamp == null ? new Date() : new Date(req.body.userTimestamp);
+
+  if (typeof latitude !== 'number' || !Number.isFinite(latitude) || latitude < -90 || latitude > 90
+    || typeof longitude !== 'number' || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    return respondError(res, 400, 'Coordonnées GPS invalides.');
+  }
+  if (!Number.isInteger(timezoneOffsetMinutes) || timezoneOffsetMinutes < -840 || timezoneOffsetMinutes > 840) {
+    return respondError(res, 400, 'Décalage horaire invalide.');
+  }
+  if (Number.isNaN(date.getTime())) {
+    return respondError(res, 400, 'Date et heure invalides.');
+  }
+
+  const dayAnchor = localDateAnchor(date, timezoneOffsetMinutes);
+  const previousDayAnchor = new Date(dayAnchor.getTime() - 24 * 60 * 60 * 1000);
+  const nextDayAnchor = new Date(dayAnchor.getTime() + 24 * 60 * 60 * 1000);
+  const previousTimes = SunCalc.getTimes(previousDayAnchor, latitude, longitude);
+  const times = SunCalc.getTimes(dayAnchor, latitude, longitude);
+  const nextTimes = SunCalc.getTimes(nextDayAnchor, latitude, longitude);
+  const { sunrise, sunset } = times;
+  const nextSunrise = nextTimes.sunrise;
+
+  if (![previousTimes.sunrise, previousTimes.sunset, sunrise, sunset, nextSunrise]
+    .every((time) => Number.isFinite(time.getTime()))
+    || previousTimes.sunset >= sunrise || sunset <= sunrise || nextSunrise <= sunset) {
+    return respondError(res, 422, 'Les heures de lever et de coucher du soleil ne sont pas disponibles pour cette position et cette date.');
+  }
+
+  const dayDuration = (sunset.getTime() - sunrise.getTime()) / 12;
+  const localSunrise = new Date(sunrise.getTime() + timezoneOffsetMinutes * 60_000);
+  const dayFirstPlanetIndex = chogadiaDayFirstPlanet[localSunrise.getUTCDay()];
+  const isBeforeSunrise = date < sunrise;
+  const nightStart = isBeforeSunrise ? previousTimes.sunset : sunset;
+  const nightEnd = isBeforeSunrise ? sunrise : nextSunrise;
+  const nightDuration = (nightEnd.getTime() - nightStart.getTime()) / 12;
+  const nightRulerSunrise = isBeforeSunrise
+    ? new Date(previousTimes.sunrise.getTime() + timezoneOffsetMinutes * 60_000)
+    : localSunrise;
+  const nightFirstPlanetIndex =
+    (chogadiaDayFirstPlanet[nightRulerSunrise.getUTCDay()] + 12) % chogadiaPlanets.length;
+
+  const makeSlots = (start, duration, section, firstPlanetIndex) => Array.from({ length: 12 }, (_unused, index) => {
+    const startTime = new Date(start.getTime() + duration * index);
+    const endTime = new Date(start.getTime() + duration * (index + 1));
+    const planet = chogadiaPlanets[(firstPlanetIndex + index) % chogadiaPlanets.length];
+    return {
+      slot: index + 1,
+      startTime: formatLocalTime(startTime, timezoneOffsetMinutes),
+      endTime: formatLocalTime(endTime, timezoneOffsetMinutes),
+      planet: planet.name,
+      code: planet.code,
+      status: planet.status,
+      isActive: date >= startTime && date < endTime,
+      section,
+    };
+  });
+
+  const localDate = new Date(date.getTime() + timezoneOffsetMinutes * 60_000);
+  return res.json({
+    locationInfo: { latitude, longitude },
+    dateFormatted: localDate.toISOString().slice(0, 10),
+    currentTime: formatLocalTime(date, timezoneOffsetMinutes),
+    sunrise: formatLocalTime(sunrise, timezoneOffsetMinutes),
+    sunset: formatLocalTime(sunset, timezoneOffsetMinutes),
+    daySlots: makeSlots(sunrise, dayDuration, 'day', dayFirstPlanetIndex),
+    nightSlots: makeSlots(nightStart, nightDuration, 'night', nightFirstPlanetIndex),
+  });
+});
 
 app.post('/api/geomancy/combine', requireAuth, (req, res) => {
   const caseTop = String(req.body?.caseTop ?? '').toUpperCase();
